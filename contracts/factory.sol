@@ -1,5 +1,10 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
 
-pragma solidity =0.5.16;
+
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 
 interface IUniverselFactory {
@@ -18,7 +23,7 @@ interface IUniverselFactory {
     function setFeeToSetter(address) external;
 }
 
-interface IUniverselPair {
+interface IUniverselERC20 {
     event Approval(address indexed owner, address indexed spender, uint value);
     event Transfer(address indexed from, address indexed to, uint value);
 
@@ -38,7 +43,9 @@ interface IUniverselPair {
     function nonces(address owner) external view returns (uint);
 
     function permit(address owner, address spender, uint value, uint deadline, uint8 v, bytes32 r, bytes32 s) external;
+}
 
+interface IUniverselPair is IUniverselERC20 {
     event Mint(address indexed sender, uint amount0, uint amount1);
     event Burn(address indexed sender, uint amount0, uint amount1, address indexed to);
     event Swap(
@@ -67,28 +74,6 @@ interface IUniverselPair {
     function sync() external;
 
     function initialize(address, address) external;
-}
-
-interface IUniverselERC20 {
-    event Approval(address indexed owner, address indexed spender, uint value);
-    event Transfer(address indexed from, address indexed to, uint value);
-
-    function name() external pure returns (string memory);
-    function symbol() external pure returns (string memory);
-    function decimals() external pure returns (uint8);
-    function totalSupply() external view returns (uint);
-    function balanceOf(address owner) external view returns (uint);
-    function allowance(address owner, address spender) external view returns (uint);
-
-    function approve(address spender, uint value) external returns (bool);
-    function transfer(address to, uint value) external returns (bool);
-    function transferFrom(address from, address to, uint value) external returns (bool);
-
-    function DOMAIN_SEPARATOR() external view returns (bytes32);
-    function PERMIT_TYPEHASH() external pure returns (bytes32);
-    function nonces(address owner) external view returns (uint);
-
-    function permit(address owner, address spender, uint value, uint deadline, uint8 v, bytes32 r, bytes32 s) external;
 }
 
 // a library for performing overflow-safe math, courtesy of DappHub (https://github.com/dapphub/ds-math)
@@ -121,13 +106,10 @@ contract UniverselERC20 is IUniverselERC20 {
     bytes32 public constant PERMIT_TYPEHASH = 0x6e71edae12b1b97f4d1f60370fef10105fa2faae0126114a169c64845d6126c9;
     mapping(address => uint) public nonces;
 
-    event Approval(address indexed owner, address indexed spender, uint value);
-    event Transfer(address indexed from, address indexed to, uint value);
-
-    constructor() public {
+    constructor() {
         uint chainId;
         assembly {
-            chainId := chainid
+            chainId := chainid()
         }
         DOMAIN_SEPARATOR = keccak256(
             abi.encode(
@@ -174,7 +156,7 @@ contract UniverselERC20 is IUniverselERC20 {
     }
 
     function transferFrom(address from, address to, uint value) external returns (bool) {
-        if (allowance[from][msg.sender] != uint(-1)) {
+        if (allowance[from][msg.sender] != type(uint).max) {
             allowance[from][msg.sender] = allowance[from][msg.sender].sub(value);
         }
         _transfer(from, to, value);
@@ -292,19 +274,7 @@ contract UniverselPair is IUniverselPair, UniverselERC20 {
         require(success && (data.length == 0 || abi.decode(data, (bool))), 'Universel: TRANSFER_FAILED');
     }
 
-    event Mint(address indexed sender, uint amount0, uint amount1);
-    event Burn(address indexed sender, uint amount0, uint amount1, address indexed to);
-    event Swap(
-        address indexed sender,
-        uint amount0In,
-        uint amount1In,
-        uint amount0Out,
-        uint amount1Out,
-        address indexed to
-    );
-    event Sync(uint112 reserve0, uint112 reserve1);
-
-    constructor() public {
+    constructor() {
         factory = msg.sender;
     }
 
@@ -317,13 +287,15 @@ contract UniverselPair is IUniverselPair, UniverselERC20 {
 
     // update reserves and, on the first call per block, price accumulators
     function _update(uint balance0, uint balance1, uint112 _reserve0, uint112 _reserve1) private {
-        require(balance0 <= uint112(-1) && balance1 <= uint112(-1), 'Universel: OVERFLOW');
+        require(balance0 <= type(uint112).max && balance1 <= type(uint112).max, 'Universel: OVERFLOW');
         uint32 blockTimestamp = uint32(block.timestamp % 2**32);
-        uint32 timeElapsed = blockTimestamp - blockTimestampLast; // overflow is desired
-        if (timeElapsed > 0 && _reserve0 != 0 && _reserve1 != 0) {
-            // * never overflows, and + overflow is desired
-            price0CumulativeLast += uint(UQ112x112.encode(_reserve1).uqdiv(_reserve0)) * timeElapsed;
-            price1CumulativeLast += uint(UQ112x112.encode(_reserve0).uqdiv(_reserve1)) * timeElapsed;
+        unchecked {
+            uint32 timeElapsed = blockTimestamp - blockTimestampLast; // overflow is desired
+            if (timeElapsed > 0 && _reserve0 != 0 && _reserve1 != 0) {
+                // * never overflows, and + overflow is desired
+                price0CumulativeLast += uint(UQ112x112.encode(_reserve1).uqdiv(_reserve0)) * timeElapsed;
+                price1CumulativeLast += uint(UQ112x112.encode(_reserve0).uqdiv(_reserve1)) * timeElapsed;
+            }
         }
         reserve0 = uint112(balance0);
         reserve1 = uint112(balance1);
@@ -446,18 +418,19 @@ contract UniverselPair is IUniverselPair, UniverselERC20 {
     }
 }
 
-contract UniverselFactory is IUniverselFactory {
-    bytes32 public constant INIT_CODE_PAIR_HASH = keccak256(abi.encodePacked(type(UniverselPair).creationCode));
-
+contract UniverselFactory is Initializable, OwnableUpgradeable, UUPSUpgradeable, IUniverselFactory {
     address public feeTo;
     address public feeToSetter;
 
     mapping(address => mapping(address => address)) public getPair;
     address[] public allPairs;
 
-    event PairCreated(address indexed token0, address indexed token1, address pair, uint);
+    function INIT_CODE_PAIR_HASH() external pure returns (bytes32) {
+        return keccak256(abi.encodePacked(type(UniverselPair).creationCode));
+    }
 
-    constructor(address _feeToSetter) public {
+    function initialize(address _feeToSetter) external initializer {
+        __Ownable_init(_feeToSetter);
         feeToSetter = _feeToSetter;
     }
 
@@ -491,4 +464,6 @@ contract UniverselFactory is IUniverselFactory {
         require(msg.sender == feeToSetter, 'Universel: FORBIDDEN');
         feeToSetter = _feeToSetter;
     }
+
+    function _authorizeUpgrade(address newImplementation) internal view override onlyOwner{}
 }

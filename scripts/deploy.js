@@ -1,14 +1,17 @@
-const { ethers } = require('hardhat');
+const { ethers, upgrades } = require('hardhat');
 
 async function main() {
   const [deployer] = await ethers.getSigners();
   console.log('Deploying from:', deployer.address);
 
-  const MyContract = await ethers.getContractFactory('MyContract');
-  const contract = await MyContract.deploy();
-  await contract.waitForDeployment();
+  const UniverselFactory = await ethers.getContractFactory('UniverselFactory');
+  const proxy = await upgrades.deployProxy(UniverselFactory, [deployer.address], {
+    initializer: 'initialize',
+    kind: 'uups',
+  });
+  await proxy.waitForDeployment();
 
-  console.log('MyContract deployed to:', await contract.getAddress());
+  console.log('UniverselFactory proxy deployed to:', await proxy.getAddress());
 }
 
 main().catch((err) => {
